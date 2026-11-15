@@ -28,7 +28,7 @@ Pop-Location
 # 2. resources + manifest
 & "$bt\aapt2.exe" compile --dir "$root\app\res" -o "$b\res.zip"; if ($LASTEXITCODE) { throw "aapt2 compile" }
 & "$bt\aapt2.exe" link -o "$b\base.apk" -I $jar --manifest "$root\app\AndroidManifest.xml" `
-    --min-sdk-version 26 --target-sdk-version 34 --version-code 3 --version-name 0.1.2 "$b\res.zip"
+    --min-sdk-version 26 --target-sdk-version 34 --version-code 4 --version-name 0.1.3 "$b\res.zip"
 if ($LASTEXITCODE) { throw "aapt2 link" }
 
 # 3. Java shell -> dex

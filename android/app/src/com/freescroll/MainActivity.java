@@ -130,7 +130,9 @@ public class MainActivity extends Activity {
     private boolean enabled(String cls) {
         String flat = Settings.Secure.getString(getContentResolver(),
             cls.contains("Buzz") ? "enabled_notification_listeners" : Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        return flat != null && flat.contains(new ComponentName(this, cls).flattenToShortString());
+        if (flat == null) return false;
+        ComponentName cn = new ComponentName(this, cls); // Android may store either spelling of the name
+        return flat.contains(cn.flattenToShortString()) || flat.contains(cn.flattenToString());
     }
 
     private int val(EditText e, int def) { try { return Math.max(0, Integer.parseInt(e.getText().toString().trim())); } catch (Exception x) { return def; } }
