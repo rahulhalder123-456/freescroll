@@ -16,6 +16,16 @@ final class Prefs {
     /** Push saved settings (and persisted break/pass state) into the Rust engine. */
     static void apply(Context c) {
         Core.setConfig(scrollLimit(c), gateSecs(c), passMin(c), breakMin(c));
+        for (java.util.Map.Entry<String, ?> e : sp(c).getAll().entrySet()) { // the user's Hard/Soft/Off choices
+            if (e.getKey().startsWith("mode:") && e.getValue() instanceof Integer) {
+                Core.setMode(e.getKey().substring(5), (Integer) e.getValue());
+            }
+        }
+    }
+    /** Remember and apply the restriction level for one app/site key. */
+    static void setMode(Context c, String site, int mode) {
+        sp(c).edit().putInt("mode:" + site, mode).apply();
+        Core.setMode(site, mode);
     }
     static void restoreState(Context c) { Core.restore(sp(c).getString("state", "")); }
     static void saveState(Context c)    { sp(c).edit().putString("state", Core.snapshot()).apply(); }

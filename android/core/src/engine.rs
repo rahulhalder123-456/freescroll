@@ -12,6 +12,18 @@ pub enum Action {
     Break = 3, // locked out until break ends
 }
 
+/// How strict FreeScroll is with one app or site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Mode {
+    Off = 0,  // no restriction at all
+    Soft = 1, // intention gate only, then stay as long as you like
+    Hard = 2, // gate + scroll stopping point + break lock
+}
+impl Mode {
+    pub fn from_i32(v: i32) -> Mode { match v { 2 => Mode::Hard, 1 => Mode::Soft, _ => Mode::Off } }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub scroll_limit_screens: u32, // 0 = never stop
@@ -47,28 +59,40 @@ pub struct Engine {
     sites: HashMap<String, SiteState>,
     pub stats: Stats,
     stopped: HashMap<String, bool>,
+    modes: HashMap<String, Mode>, // user overrides; otherwise sites::default_mode
 }
 
 impl Engine {
     pub fn new() -> Self { Self::default() }
 
+    pub fn set_mode(&mut self, site: &str, m: Mode) { self.modes.insert(site.to_string(), m); }
+
+    /// The user's choice for this site, or the built-in default.
+    pub fn mode_of(&self, site: &str) -> Mode {
+        self.modes.get(site).copied().unwrap_or_else(|| crate::sites::default_mode(site))
+    }
+
     /// A tracked site just came to the foreground (or its URL changed).
     pub fn on_foreground(&mut self, site: &str, now: u64) -> Action {
+        let mode = self.mode_of(site);
+        if mode == Mode::Off { return Action::None; }
         let st = self.sites.entry(site.to_string()).or_default();
-        if st.break_until > now { return Action::Break; }
+        if mode == Mode::Hard && st.break_until > now { return Action::Break; }
         if self.cfg.gate_secs > 0 && st.pass_until <= now { return Action::Gate; }
         Action::None
     }
 
     /// Scrolling happened inside a tracked site. `px` is vertical distance in pixels.
     pub fn on_scroll(&mut self, site: &str, px: f64, screen_h: f64, now: u64) -> Action {
+        let mode = self.mode_of(site);
+        if mode == Mode::Off { return Action::None; }
         let limit = self.cfg.scroll_limit_screens;
         let st = self.sites.entry(site.to_string()).or_default();
-        if st.break_until > now { return Action::Break; }
+        if mode == Mode::Hard && st.break_until > now { return Action::Break; }
         let d = px.abs();
         st.travelled_px += d;
         self.stats.screens_scrolled += if screen_h > 0.0 { d / screen_h } else { 0.0 };
-        if limit == 0 || screen_h <= 0.0 { return Action::None; }
+        if mode != Mode::Hard || limit == 0 || screen_h <= 0.0 { return Action::None; }
         if st.travelled_px > limit as f64 * screen_h {
             if !*self.stopped.get(site).unwrap_or(&false) {
                 self.stopped.insert(site.to_string(), true);
@@ -141,10 +165,15 @@ impl Engine {
 mod tests {
     use super::*;
     const H: f64 = 2000.0;
+    fn hard() -> Engine {
+        let mut e = Engine::new();
+        for k in ["a", "b", "com.x", "web:instagram.com"] { e.set_mode(k, Mode::Hard); }
+        e
+    }
 
     #[test]
     fn gate_then_pass() {
-        let mut e = Engine::new();
+        let mut e = hard();
         assert_eq!(e.on_foreground("a", 0), Action::Gate);
         e.gate_passed("a", 0);
         assert_eq!(e.on_foreground("a", 1000), Action::None);
@@ -152,7 +181,7 @@ mod tests {
     }
     #[test]
     fn stops_after_limit_and_break_locks() {
-        let mut e = Engine::new();
+        let mut e = hard();
         e.gate_passed("a", 0);
         for _ in 0..8 { assert_eq!(e.on_scroll("a", H, H, 10), Action::None); }
         assert_eq!(e.on_scroll("a", 1.0, H, 10), Action::Stop);
@@ -165,7 +194,7 @@ mod tests {
     }
     #[test]
     fn continue_gives_half_allowance() {
-        let mut e = Engine::new();
+        let mut e = hard();
         e.gate_passed("a", 0);
         for _ in 0..9 { e.on_scroll("a", H, H, 10); }
         e.continue_anyway("a", H);
@@ -174,25 +203,58 @@ mod tests {
     }
     #[test]
     fn limit_zero_never_stops() {
-        let mut e = Engine::new();
+        let mut e = hard();
         e.cfg.scroll_limit_screens = 0;
         for _ in 0..100 { assert_eq!(e.on_scroll("a", H, H, 1), Action::None); }
     }
     #[test]
     fn snapshot_roundtrip() {
-        let mut e = Engine::new();
+        let mut e = hard();
         e.gate_passed("web:instagram.com", 5);
         e.start_break("com.x", 9);
         let s = e.snapshot();
-        let mut f = Engine::new();
+        let mut f = hard();
         f.restore(&s);
         assert_eq!(f.on_foreground("com.x", 10), Action::Break);
         assert_eq!(f.on_foreground("web:instagram.com", 10), Action::None);
     }
     #[test]
     fn sites_are_independent() {
-        let mut e = Engine::new();
+        let mut e = hard();
         e.start_break("a", 0);
         assert_eq!(e.on_foreground("b", 1), Action::Gate);
+    }
+
+    #[test]
+    fn soft_gates_but_never_stops_or_locks() {
+        let mut e = hard();
+        e.set_mode("a", Mode::Soft);
+        assert_eq!(e.on_foreground("a", 0), Action::Gate);
+        e.gate_passed("a", 0);
+        for _ in 0..50 { assert_eq!(e.on_scroll("a", H, H, 10), Action::None); }
+        assert_eq!(e.stats.stops, 0);
+    }
+    #[test]
+    fn off_does_nothing() {
+        let mut e = hard();
+        e.set_mode("a", Mode::Off);
+        assert_eq!(e.on_foreground("a", 0), Action::None);
+        assert_eq!(e.on_scroll("a", H * 100.0, H, 0), Action::None);
+    }
+    #[test]
+    fn soft_ignores_an_old_break() {
+        let mut e = hard();
+        e.start_break("a", 0);
+        e.set_mode("a", Mode::Soft);
+        assert_ne!(e.on_foreground("a", 1), Action::Break);
+    }
+    #[test]
+    fn defaults_follow_the_site_list() {
+        let e = Engine::new();
+        assert_eq!(e.mode_of("com.instagram.android"), Mode::Hard);
+        assert_eq!(e.mode_of("com.whatsapp"), Mode::Soft);
+        assert_eq!(e.mode_of("com.some.unknown.social"), Mode::Soft);
+        assert_eq!(e.mode_of("com.google.android.youtube"), Mode::Soft);
+        assert_eq!(e.mode_of("com.google.android.youtube/shorts"), Mode::Hard);
     }
 }

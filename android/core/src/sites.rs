@@ -47,6 +47,28 @@ pub const BROWSER_URL_IDS: &[(&str, &str)] = &[
     ("com.UCMobile.intl", "com.UCMobile.intl:id/url_bar"),
 ];
 
+/// Apps built around endless short-video or swipe feeds: strict (Hard) by default.
+/// Keys are package names, or "<package>/shorts" for the Shorts screen inside YouTube.
+pub const HARD_BY_DEFAULT: &[&str] = &[
+    "com.facebook.katana", "com.facebook.lite", "com.facebook.mlite",
+    "com.instagram.android", "com.instagram.barcelona", "com.instagram.lite",
+    "com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.ss.android.ugc.tiktok.lite",
+    "com.google.android.youtube/shorts", "com.google.android.apps.youtube.mango/shorts", "app.revanced.android.youtube/shorts",
+    "com.snapchat.android", "com.reddit.frontpage", "com.pinterest", "com.tumblr",
+    "com.kwai.video", "com.kwai.bulldog", "com.sharechat.app", "in.mohalla.sharechat", "in.mohalla.video",
+    "com.roposo.android", "com.likee.video", "video.like", "com.bereal.ft", "com.vsco.cam", "com.lemon8.android",
+    "com.tinder", "com.bumble.app", "com.hinge.app",
+    // websites
+    "web:facebook.com", "web:fb.com", "web:fb.watch", "web:instagram.com", "web:tiktok.com", "web:youtube.com/shorts",
+    "web:snapchat.com", "web:reddit.com", "web:pinterest.com", "web:tumblr.com", "web:threads.net", "web:sharechat.com",
+    "web:moj.app", "web:likee.video", "web:kwai.com", "web:bereal.com", "web:tinder.com", "web:bumble.com",
+];
+
+/// Everything else (messaging, long video, X, LinkedIn, ...) starts Soft: gate once, then stay as long as you like.
+pub fn default_mode(site: &str) -> crate::engine::Mode {
+    if HARD_BY_DEFAULT.contains(&site) { crate::engine::Mode::Hard } else { crate::engine::Mode::Soft }
+}
+
 pub fn is_social_package(pkg: &str) -> bool { SOCIAL_PACKAGES.contains(&pkg) }
 
 pub fn url_id_for_browser(pkg: &str) -> Option<&'static str> {
@@ -59,10 +81,12 @@ pub fn site_for_url(text: &str) -> Option<String> {
     let t = text.trim().to_lowercase();
     let t = t.split("://").last().unwrap_or(&t);
     let host = t.split(|c| c == '/' || c == '?' || c == '#' || c == ' ').next().unwrap_or("");
+    let path = t[host.len()..].trim_start_matches('/');
     let host = host.split('@').last().unwrap_or(host).split(':').next().unwrap_or(host);
-    SOCIAL_DOMAINS.iter()
-        .find(|d| host == **d || host.ends_with(&format!(".{}", d)))
-        .map(|d| format!("web:{}", d))
+    let dom = SOCIAL_DOMAINS.iter().find(|d| host == **d || host.ends_with(&format!(".{}", d)))?;
+    // YouTube Shorts are the scrolling trap; long videos on the same site are not.
+    if (*dom == "youtube.com") && path.starts_with("shorts") { return Some("web:youtube.com/shorts".to_string()); }
+    Some(format!("web:{}", dom))
 }
 
 #[cfg(test)]
@@ -77,6 +101,9 @@ mod tests {
         assert_eq!(site_for_url("example.com/?u=facebook.com"), None);
         assert_eq!(site_for_url("music.youtube.com/watch").as_deref(), Some("web:youtube.com"));
         assert_eq!(site_for_url("google.com"), None);
+        assert_eq!(site_for_url("m.youtube.com/shorts/abc123").as_deref(), Some("web:youtube.com/shorts"));
+        assert_eq!(site_for_url("https://www.youtube.com/watch?v=1").as_deref(), Some("web:youtube.com"));
+        assert_eq!(site_for_url("youtube.com/shortsfan").as_deref(), Some("web:youtube.com/shorts")); // prefix is fine for our purpose
     }
     #[test]
     fn packages() {

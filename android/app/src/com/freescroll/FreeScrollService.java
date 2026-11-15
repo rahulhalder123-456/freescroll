@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -25,6 +26,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +45,7 @@ public class FreeScrollService extends AccessibilityService {
     private AudioFocusRequest focusReq;
     private int prevVolume = -1; // >= 0 while we hold the media stream muted
     private long suppressUntil = 0; // ignore events until this time (set when the user leaves)
+    private String currentPkg = ""; // the app that last reported a window-state change (= the one in front)
 
     private String lastPkg = "", lastSite = "";
     private long lastWebCheck = 0;
@@ -74,9 +77,9 @@ public class FreeScrollService extends AccessibilityService {
         if (stuck >= 0) restoreVolume(stuck);
     }
 
-    @Override public void onInterrupt() { dismiss(); }
-    @Override public boolean onUnbind(android.content.Intent i) { dismiss(); return super.onUnbind(i); }
-    @Override public void onDestroy() { dismiss(); super.onDestroy(); }
+    @Override public void onInterrupt() { dismiss(); removeCovers(); }
+    @Override public boolean onUnbind(android.content.Intent i) { dismiss(); removeCovers(); return super.onUnbind(i); }
+    @Override public void onDestroy() { dismiss(); removeCovers(); super.onDestroy(); }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent ev) {
         CharSequence cs = ev.getPackageName();
@@ -84,9 +87,14 @@ public class FreeScrollService extends AccessibilityService {
         String pkg = cs.toString();
         if (pkg.equals(getPackageName()) || pkg.equals("com.android.systemui") || isKeyboard(pkg)) return;
         if (System.currentTimeMillis() < suppressUntil) return;
+        // A window-state change means a different app really came to the front. Any other event from an app that
+        // is no longer in front is a late echo (e.g. right after Go home) and must not bring an overlay back.
+        if (ev.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) currentPkg = pkg;
+        else if (!currentPkg.isEmpty() && !pkg.equals(currentPkg)) return;
 
         String site = siteFor(pkg);
-        if (site == null) { lastPkg = pkg; lastSite = ""; dismiss(); return; }
+        if (site == null) { lastPkg = pkg; lastSite = ""; dismiss(); updateRecentsCovers(pkg); return; }
+        removeCovers(); // a social app itself is on screen, not the Recents list
 
         int type = ev.getEventType();
         long now = System.currentTimeMillis();
@@ -113,6 +121,7 @@ public class FreeScrollService extends AccessibilityService {
 
     /** Package name for social apps, "web:<domain>" for a social site in a browser, else null. */
     private String siteFor(String pkg) {
+        if (isYouTube(pkg)) return onShortsScreen(pkg) ? pkg + "/shorts" : pkg; // Shorts strict, long videos soft
         if (isSocial(this, pkg)) return pkg;
         String idRes = Core.urlIdForBrowser(pkg);
         if (idRes == null || idRes.isEmpty()) return null;
@@ -130,6 +139,121 @@ public class FreeScrollService extends AccessibilityService {
             String s = t == null ? "" : Core.siteForUrl(t.toString());
             return s.isEmpty() ? null : s;
         } finally { root.recycle(); }
+    }
+
+    // ---------------------------------------------------------------- Recents previews
+    // The phone's Recents screen shows a picture of each app's last screen (a reel, for example). That picture is
+    // drawn by the launcher, so it can't be edited; instead we put an opaque card exactly over the preview of every
+    // app that is in Hard mode, and move it as the cards scroll.
+    private final List<View> covers = new ArrayList<>();
+    private final List<Rect> coverRects = new ArrayList<>();
+    private long lastRecentsScan = 0;
+    private Map<String, String> labelToPkg = new HashMap<>();
+    private long labelsAt = 0;
+
+    private void refreshLabels() {
+        long now = System.currentTimeMillis();
+        if (now - labelsAt < 60000 && !labelToPkg.isEmpty()) return;
+        labelsAt = now;
+        Map<String, String> m = new HashMap<>();
+        android.content.pm.PackageManager pm = getPackageManager();
+        for (String k : Core.knownPackages().split(",")) {
+            try { m.put(pm.getApplicationLabel(pm.getApplicationInfo(k, 0)).toString().toLowerCase(), k); } catch (Exception ignored) { }
+        }
+        labelToPkg = m;
+    }
+
+    private void updateRecentsCovers(String launcherPkg) {
+        long now = System.currentTimeMillis();
+        if (now - lastRecentsScan < 100) return;
+        lastRecentsScan = now;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return;
+        List<Rect> rects = new ArrayList<>();
+        boolean recents = false;
+        try {
+            // view ids the launchers use for the preview of one task (Pixel launcher: "snapshot")
+            for (String id : new String[]{"snapshot", "task_view_thumbnail", "thumbnail"}) {
+                List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(launcherPkg + ":id/" + id);
+                if (nodes == null || nodes.isEmpty()) continue;
+                recents = true;
+                refreshLabels();
+                int w = getResources().getDisplayMetrics().widthPixels;
+                for (AccessibilityNodeInfo n : nodes) {
+                    CharSequence d = n.getContentDescription();
+                    String pkg = d == null ? null : labelToPkg.get(d.toString().trim().toLowerCase());
+                    if (pkg != null && Core.modeOf(pkg) == Core.HARD) {
+                        Rect b = new Rect(); n.getBoundsInScreen(b);
+                        if (b.width() > 0 && b.height() > 0 && b.right > 0 && b.left < w) rects.add(b);
+                    }
+                    n.recycle();
+                }
+                break;
+            }
+        } finally { root.recycle(); }
+        if (!recents) { removeCovers(); return; }
+        layoutCovers(rects);
+    }
+
+    private void layoutCovers(List<Rect> rects) {
+        while (covers.size() > rects.size()) {
+            View v = covers.remove(covers.size() - 1); coverRects.remove(coverRects.size() - 1);
+            try { wm.removeView(v); } catch (Exception ignored) { }
+        }
+        for (int i = 0; i < rects.size(); i++) {
+            Rect r = rects.get(i);
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(r.width(), r.height(),
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.OPAQUE);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            lp.x = r.left; lp.y = r.top;
+            if (i >= covers.size()) {
+                TextView t = new TextView(this);
+                t.setText("Hidden by FreeScroll\nHard mode"); t.setTextColor(Color.parseColor("#b8c0c6")); t.setTextSize(15);
+                t.setGravity(Gravity.CENTER); t.setBackgroundColor(Color.parseColor("#101418"));
+                try { wm.addView(t, lp); covers.add(t); coverRects.add(new Rect(r)); } catch (Exception ignored) { return; }
+            } else if (!coverRects.get(i).equals(r)) {
+                try { wm.updateViewLayout(covers.get(i), lp); coverRects.set(i, new Rect(r)); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    private void removeCovers() {
+        if (covers.isEmpty()) return;
+        for (View v : covers) { try { wm.removeView(v); } catch (Exception ignored) { } }
+        covers.clear(); coverRects.clear();
+    }
+
+    private static boolean isYouTube(String pkg) {
+        return pkg.equals("com.google.android.youtube") || pkg.equals("com.google.android.apps.youtube.mango")
+                || pkg.equals("app.revanced.android.youtube");
+    }
+
+    private boolean shortsCached = false;
+    private long shortsCheckedAt = 0;
+
+    /**
+     * Is YouTube showing the Shorts player? Looks for the Shorts player's view ids (best effort: YouTube can rename
+     * them in an update; if it does, YouTube simply stays in its Soft mode).
+     */
+    private boolean onShortsScreen(String pkg) {
+        long now = System.currentTimeMillis();
+        if (now - shortsCheckedAt < 700) return shortsCached;
+        shortsCheckedAt = now;
+        boolean found = false;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) {
+            try {
+                for (String id : new String[]{"reel_player_page_container", "reel_recycler", "reel_watch_fragment_root"}) {
+                    List<AccessibilityNodeInfo> n = root.findAccessibilityNodeInfosByViewId(pkg + ":id/" + id);
+                    if (n != null && !n.isEmpty()) { found = true; break; }
+                }
+            } finally { root.recycle(); }
+        }
+        shortsCached = found;
+        return found;
     }
 
     // ---------------------------------------------------------------- overlays

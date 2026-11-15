@@ -21,4 +21,11 @@ public final class Core {
     public static native String snapshot();
     public static native void restore(String snap);
     public static native String statsJson();
+
+    /** Restriction level per app/site. */
+    public static final int OFF = 0, SOFT = 1, HARD = 2;
+    public static native void setMode(String site, int mode);
+    public static native int modeOf(String site);
+    public static native String knownPackages();
+    public static native String knownSites();
 }

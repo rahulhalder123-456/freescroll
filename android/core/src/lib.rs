@@ -130,3 +130,37 @@ pub extern "system" fn Java_com_freescroll_Core_statsJson(env: JNIEnv, _c: JClas
     let mut env = env;
     out(&mut env, &v)
 }
+
+/// mode: 0 = Off, 1 = Soft, 2 = Hard
+#[no_mangle]
+pub extern "system" fn Java_com_freescroll_Core_setMode(
+    mut env: JNIEnv, _c: JClass, site: JString, mode: jint,
+) {
+    let k = s(&mut env, &site);
+    lock().set_mode(&k, engine::Mode::from_i32(mode));
+}
+
+/// The mode in force for a site (the user's choice or the built-in default).
+#[no_mangle]
+pub extern "system" fn Java_com_freescroll_Core_modeOf(
+    mut env: JNIEnv, _c: JClass, site: JString,
+) -> jint {
+    let k = s(&mut env, &site);
+    lock().mode_of(&k) as jint
+}
+
+/// Comma-separated list of every known social package name.
+#[no_mangle]
+pub extern "system" fn Java_com_freescroll_Core_knownPackages(env: JNIEnv, _c: JClass) -> jstring {
+    let mut env = env;
+    out(&mut env, &sites::SOCIAL_PACKAGES.join(","))
+}
+
+/// Comma-separated list of every known social website, as engine keys ("web:domain").
+#[no_mangle]
+pub extern "system" fn Java_com_freescroll_Core_knownSites(env: JNIEnv, _c: JClass) -> jstring {
+    let mut env = env;
+    let mut v: Vec<String> = sites::SOCIAL_DOMAINS.iter().map(|d| format!("web:{}", d)).collect();
+    v.push("web:youtube.com/shorts".to_string());
+    out(&mut env, &v.join(","))
+}
