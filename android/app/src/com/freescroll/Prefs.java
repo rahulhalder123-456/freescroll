@@ -9,7 +9,7 @@ final class Prefs {
 
     static int scrollLimit(Context c) { return sp(c).getInt("scrollLimit", 8); }
     static int gateSecs(Context c)    { return sp(c).getInt("gateSecs", 10); }
-    static int passMin(Context c)     { return sp(c).getInt("passMin", 20); }
+    static int passMin(Context c)     { return sp(c).getInt("passMin", 2); } // minutes away before the gate asks again
     static int breakMin(Context c)    { return sp(c).getInt("breakMin", 5); }
     static boolean silence(Context c) { return sp(c).getBoolean("silence", true); }
 

@@ -28,12 +28,12 @@ impl Mode {
 pub struct Config {
     pub scroll_limit_screens: u32, // 0 = never stop
     pub gate_secs: u32,
-    pub gate_pass_min: u32, // how long one answered gate stays valid
+    pub gate_pass_min: u32, // minutes away after which the gate asks again (refreshed while you are in the app)
     pub break_min: u32,
 }
 impl Default for Config {
     fn default() -> Self {
-        Config { scroll_limit_screens: 8, gate_secs: 10, gate_pass_min: 20, break_min: 5 }
+        Config { scroll_limit_screens: 8, gate_secs: 10, gate_pass_min: 2, break_min: 5 }
     }
 }
 
@@ -76,9 +76,15 @@ impl Engine {
     pub fn on_foreground(&mut self, site: &str, now: u64) -> Action {
         let mode = self.mode_of(site);
         if mode == Mode::Off { return Action::None; }
+        // A stopping point the user walked away from without answering is still pending when they come back.
+        let pending_stop = mode == Mode::Hard && *self.stopped.get(site).unwrap_or(&false);
+        let pass_ms = self.cfg.gate_pass_min as u64 * 60_000;
+        let gate_on = self.cfg.gate_secs > 0;
         let st = self.sites.entry(site.to_string()).or_default();
         if mode == Mode::Hard && st.break_until > now { return Action::Break; }
-        if self.cfg.gate_secs > 0 && st.pass_until <= now { return Action::Gate; }
+        if pending_stop { return Action::Stop; }
+        if gate_on && st.pass_until <= now { return Action::Gate; }
+        if st.pass_until > now { st.pass_until = now + pass_ms; } // being here keeps the pass alive
         Action::None
     }
 
@@ -87,8 +93,10 @@ impl Engine {
         let mode = self.mode_of(site);
         if mode == Mode::Off { return Action::None; }
         let limit = self.cfg.scroll_limit_screens;
+        let pass_ms = self.cfg.gate_pass_min as u64 * 60_000;
         let st = self.sites.entry(site.to_string()).or_default();
         if mode == Mode::Hard && st.break_until > now { return Action::Break; }
+        if st.pass_until > now { st.pass_until = now + pass_ms; } // scrolling = still here
         let d = px.abs();
         st.travelled_px += d;
         self.stats.screens_scrolled += if screen_h > 0.0 { d / screen_h } else { 0.0 };
@@ -177,7 +185,7 @@ mod tests {
         assert_eq!(e.on_foreground("a", 0), Action::Gate);
         e.gate_passed("a", 0);
         assert_eq!(e.on_foreground("a", 1000), Action::None);
-        assert_eq!(e.on_foreground("a", 21 * 60_000), Action::Gate); // expired
+        assert_eq!(e.on_foreground("a", 4 * 60_000), Action::Gate); // away longer than 2 min -> asked again
     }
     #[test]
     fn stops_after_limit_and_break_locks() {
@@ -256,5 +264,36 @@ mod tests {
         assert_eq!(e.mode_of("com.some.unknown.social"), Mode::Soft);
         assert_eq!(e.mode_of("com.google.android.youtube"), Mode::Soft);
         assert_eq!(e.mode_of("com.google.android.youtube/shorts"), Mode::Hard);
+    }
+
+    #[test]
+    fn unanswered_stop_is_still_there_after_leaving_and_returning() {
+        let mut e = hard();
+        e.gate_passed("a", 0);
+        for _ in 0..8 { e.on_scroll("a", H, H, 10); }
+        assert_eq!(e.on_scroll("a", 1.0, H, 10), Action::Stop);
+        // user minimises without choosing, then returns
+        assert_eq!(e.on_foreground("a", 5_000), Action::Stop);
+        assert_eq!(e.on_foreground("a", 6_000), Action::Stop);
+        e.continue_anyway("a", H);
+        assert_ne!(e.on_foreground("a", 7_000), Action::Stop);
+    }
+    #[test]
+    fn pass_stays_alive_while_in_the_app_and_expires_when_away() {
+        let mut e = hard();
+        e.gate_passed("a", 0);
+        // keeps scrolling for 10 minutes: never asked again
+        for k in 1..=10 { assert_eq!(e.on_scroll("a", 10.0, H, k * 60_000), Action::None); }
+        assert_eq!(e.on_foreground("a", 10 * 60_000 + 30_000), Action::None);
+        // leaves for 3 minutes: asked again
+        assert_eq!(e.on_foreground("a", 10 * 60_000 + 30_000 + 3 * 60_000), Action::Gate);
+    }
+    #[test]
+    fn stop_pending_is_ignored_once_mode_is_soft() {
+        let mut e = hard();
+        e.gate_passed("a", 0);
+        for _ in 0..9 { e.on_scroll("a", H, H, 10); }
+        e.set_mode("a", Mode::Soft);
+        assert_ne!(e.on_foreground("a", 20), Action::Stop);
     }
 }

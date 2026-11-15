@@ -31,7 +31,7 @@ import java.util.Set;
 
 public class MainActivity extends Activity {
     private TextView status, stats, stepsHelp;
-    private EditText limit, gate, brk;
+    private EditText limit, gate, brk, away;
     private CheckBox silence;
     private Button b1, b2, b3;
 
@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
         root.addView(text("\nLimits for HARD mode", 16, true));
         limit = num(root, "Stop after N screens (0 = never)", Prefs.scrollLimit(this));
         gate  = num(root, "Intention gate wait, seconds (0 = off)", Prefs.gateSecs(this));
+        away  = num(root, "Ask \"why are you here?\" again after being away this many minutes", Prefs.passMin(this));
         brk   = num(root, "Break length, minutes", Prefs.breakMin(this));
         silence = new CheckBox(this); silence.setText("Silence notifications from social apps");
         silence.setChecked(Prefs.silence(this)); root.addView(silence);
@@ -101,7 +102,24 @@ public class MainActivity extends Activity {
         if (!consented()) askConsent();
     }
 
-    @Override protected void onResume() { super.onResume(); refresh(); }
+    @Override protected void onResume() { super.onResume(); rescueVolume(); refresh(); }
+
+    /**
+     * If FreeScroll was force-stopped (or its service switched off) while it was holding the media volume muted,
+     * Android never gives it a chance to restore the sound. Put it back the next time the app is opened.
+     */
+    private void rescueVolume() {
+        if (enabled(FreeScrollService.class.getName())) return; // a running service restores it itself
+        int stuck = Prefs.sp(this).getInt("prevVol", -1);
+        if (stuck < 0) return;
+        try {
+            android.media.AudioManager am = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            am.adjustStreamVolume(android.media.AudioManager.STREAM_MUSIC, android.media.AudioManager.ADJUST_UNMUTE, 0);
+            if (am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) == 0)
+                am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, stuck, 0);
+        } catch (Exception ignored) { }
+        Prefs.sp(this).edit().remove("prevVol").apply();
+    }
 
     // ------------------------------------------------------------------ dashboard
     private void buildAppRows(LinearLayout box) {
@@ -196,7 +214,8 @@ public class MainActivity extends Activity {
     private void save() {
         Prefs.sp(this).edit()
             .putInt("scrollLimit", val(limit, 8)).putInt("gateSecs", val(gate, 10))
-            .putInt("breakMin", Math.max(1, val(brk, 5))).putBoolean("silence", silence.isChecked()).apply();
+            .putInt("breakMin", Math.max(1, val(brk, 5))).putInt("passMin", Math.max(1, val(away, 2)))
+            .putBoolean("silence", silence.isChecked()).apply();
         Prefs.apply(this);
         refresh();
     }

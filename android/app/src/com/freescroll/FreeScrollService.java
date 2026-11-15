@@ -90,7 +90,11 @@ public class FreeScrollService extends AccessibilityService {
         // A window-state change means a different app really came to the front. Any other event from an app that
         // is no longer in front is a late echo (e.g. right after Go home) and must not bring an overlay back.
         if (ev.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) currentPkg = pkg;
-        else if (!currentPkg.isEmpty() && !pkg.equals(currentPkg)) return;
+        else if (!currentPkg.isEmpty() && !pkg.equals(currentPkg)) {
+            // Resuming an app from Recents does NOT always send a window-state change, so ask Android which window
+            // is really active instead of trusting the last one we saw. Only a genuine late echo is ignored.
+            if (pkg.equals(activePackage())) currentPkg = pkg; else return;
+        }
 
         String site = siteFor(pkg);
         if (site == null) { lastPkg = pkg; lastSite = ""; dismiss(); updateRecentsCovers(pkg); return; }
@@ -111,6 +115,14 @@ public class FreeScrollService extends AccessibilityService {
         }
         lastPkg = pkg;
         lastSite = site;
+    }
+
+    /** Package of the window the user is looking at right now ("" if Android can't say). */
+    private String activePackage() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "";
+        try { CharSequence c = root.getPackageName(); return c == null ? "" : c.toString(); }
+        finally { root.recycle(); }
     }
 
     private boolean isKeyboard(String pkg) {
