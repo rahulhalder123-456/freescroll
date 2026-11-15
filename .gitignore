@@ -1,0 +1,6 @@
+target/
+build/
+*.keystore
+*.jks
+FreeScroll.apk
+*.idsig

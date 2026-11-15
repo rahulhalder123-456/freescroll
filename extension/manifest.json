@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "FreeScroll",
+  "version": "0.1.0",
+  "description": "Defuses the 10 attention traps of social media: stopping points, calm colours, hidden counts, intention gate, no buzz.",
+  "permissions": ["storage"],
+  "action": { "default_popup": "popup.html", "default_title": "FreeScroll" },
+  "content_scripts": [
+    {
+      "matches": ["*://*.facebook.com/*","*://*.instagram.com/*","*://*.youtube.com/*","*://*.tiktok.com/*","*://x.com/*","*://*.twitter.com/*","*://*.reddit.com/*","*://*.snapchat.com/*","*://*.linkedin.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.facebook.com/*","*://*.instagram.com/*","*://*.youtube.com/*","*://*.tiktok.com/*","*://x.com/*","*://*.twitter.com/*","*://*.reddit.com/*","*://*.snapchat.com/*","*://*.linkedin.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start"
+    }
+  ]
+}

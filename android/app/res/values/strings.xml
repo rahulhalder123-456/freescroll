@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="service_desc">FreeScroll notices when a social media app or website is open and when you scroll, so it can ask why you are there and give you a stopping point. It never reads or sends your messages or posts.</string>
+</resources>

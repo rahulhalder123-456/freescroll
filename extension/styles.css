@@ -1,0 +1,51 @@
+/* Each rule is switched on by a class that content.js puts on <html>.
+   Selectors are best-effort: sites rename markup often. */
+
+/* Trap 5: optional greyscale to cut the pull of colour */
+html.fs-gray { filter: grayscale(1) !important; }
+
+/* Trap 3: streaks */
+html.fs-streaks [class*="streak" i], html.fs-streaks [aria-label*="streak" i] { display: none !important; }
+
+/* Trap 4: typing indicators */
+html.fs-typing [class*="typing" i], html.fs-typing [aria-label*="typing" i], html.fs-typing [data-testid*="typing" i] { display: none !important; }
+
+/* Trap 7: stories / ephemeral content */
+html.fs-stories [aria-label*="stories" i], html.fs-stories [class*="stories" i], html.fs-stories [data-testid*="story" i],
+html.fs-stories [data-testid="storyTray"] { display: none !important; }
+
+/* Trap 6: recommendation engines */
+html.fs-feed.fs-youtube ytd-rich-grid-renderer, html.fs-feed.fs-youtube ytd-reel-shelf-renderer,
+html.fs-feed.fs-youtube ytd-rich-section-renderer, html.fs-feed.fs-youtube #related,
+html.fs-feed.fs-youtube ytd-guide-entry-renderer:has(a[title="Shorts"]),
+html.fs-feed.fs-youtube ytd-mini-guide-entry-renderer[aria-label="Shorts"],
+html.fs-feed.fs-youtube ytd-watch-next-secondary-results-renderer { display: none !important; }
+html.fs-feed.fs-instagram a[href="/reels/"], html.fs-feed.fs-instagram a[href="/explore/"] { display: none !important; }
+html.fs-feed.fs-facebook a[href*="/reel"], html.fs-feed.fs-facebook a[href*="/watch"] { display: none !important; }
+html.fs-feed.fs-x [aria-label*="Trending" i], html.fs-feed.fs-x [data-testid="sidebarColumn"] { display: none !important; }
+html.fs-feed.fs-reddit shreddit-ad-post, html.fs-feed.fs-reddit a[href="/r/popular/"] { display: none !important; }
+
+/* Trap 8: likes / followers / views */
+html.fs-counts.fs-x [data-testid="like"] span, html.fs-counts.fs-x [data-testid="unlike"] span,
+html.fs-counts.fs-x [data-testid="retweet"] span, html.fs-counts.fs-x [data-testid="reply"] span { visibility: hidden !important; }
+html.fs-counts.fs-instagram a[href*="liked_by"], html.fs-counts.fs-instagram section span[class*="html-span"] { visibility: hidden !important; }
+html.fs-counts.fs-youtube like-button-view-model .yt-spec-button-shape-next__button-text-content,
+html.fs-counts.fs-youtube #owner-sub-count, html.fs-counts.fs-youtube #subscriber-count { visibility: hidden !important; }
+html.fs-counts [aria-label*="followers" i], html.fs-counts [aria-label*="reactions" i] { visibility: hidden !important; }
+
+/* Trap 2: calm badges (JS also recolours red ones it finds) */
+.fs-calm { background: #888 !important; color: #fff !important; box-shadow: none !important; }
+
+/* Overlays */
+#fs-overlay { position: fixed; inset: 0; z-index: 2147483647; background: #101418; color: #f2f4f5;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  font: 18px/1.5 system-ui, sans-serif; padding: 24px; text-align: center; }
+#fs-overlay h1 { font-size: 28px; margin: 0; }
+#fs-overlay p { max-width: 520px; margin: 0; color: #b8c0c6; }
+#fs-overlay input { width: min(420px, 90vw); padding: 12px; font-size: 18px; border-radius: 8px; border: 1px solid #44505a; background: #1b2229; color: #fff; }
+#fs-overlay button { padding: 12px 22px; font-size: 16px; border-radius: 8px; border: 0; cursor: pointer; background: #3b82f6; color: #fff; }
+#fs-overlay button.fs-secondary { background: #2a343d; }
+#fs-overlay button:disabled { opacity: .45; cursor: not-allowed; }
+#fs-overlay .fs-row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+#fs-pill { position: fixed; bottom: 12px; left: 12px; z-index: 2147483646; background: #101418cc; color: #f2f4f5;
+  font: 13px system-ui, sans-serif; padding: 6px 10px; border-radius: 999px; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
