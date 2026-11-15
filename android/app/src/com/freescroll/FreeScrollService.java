@@ -13,6 +13,8 @@ import android.os.Build;
 import android.view.KeyEvent;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.util.Log;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -43,8 +45,17 @@ public class FreeScrollService extends AccessibilityService {
     private Runnable ticker;
     private AudioManager audio;
     private AudioFocusRequest focusReq;
-    private int prevVolume = -1; // >= 0 while we hold the media stream muted
+    private volatile int prevVolume = -1; // >= 0 while we hold the media stream muted
     private long suppressUntil = 0; // ignore events until this time (set when the user leaves)
+    private long evTime = 0; // uptime at which Android created the event being handled
+    private volatile int cachedVol = -1;            // media volume read ahead of time, so muting needs just ONE call to Android
+    private volatile boolean cachedMuted = false;
+    private long cacheAt = 0;
+    private android.os.HandlerThread bgThread;
+    private Handler bg;                    // slow work (view-tree scans, audio reads) that must not block event handling
+    private volatile boolean scanning = false;
+    private String imePkg = "";
+    private long imeAt = -100000;
     private String currentPkg = ""; // the app that last reported a window-state change (= the one in front)
 
     private String lastPkg = "", lastSite = "";
@@ -71,17 +82,36 @@ public class FreeScrollService extends AccessibilityService {
         super.onServiceConnected();
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        bgThread = new android.os.HandlerThread("fs-bg"); bgThread.start(); bg = new Handler(bgThread.getLooper());
         Prefs.apply(this);
         Prefs.restoreState(this);
         int stuck = Prefs.sp(this).getInt("prevVol", -1); // we were killed while muted: give the sound back
         if (stuck >= 0) restoreVolume(stuck);
+        bg.post(this::refreshAudioCache);
+        // Warm up: the first time Android builds these widgets it loads classes and resources, which is slow.
+        // Do it now, once, instead of while the user is waiting for the first screen.
+        new EditText(this); new Button(this); new TextView(this); new LinearLayout(this);
     }
 
     @Override public void onInterrupt() { dismiss(); removeCovers(); }
     @Override public boolean onUnbind(android.content.Intent i) { dismiss(); removeCovers(); return super.onUnbind(i); }
-    @Override public void onDestroy() { dismiss(); removeCovers(); super.onDestroy(); }
+    @Override public void onDestroy() {
+        dismiss(); removeCovers();
+        if (bgThread != null) bgThread.quitSafely();
+        super.onDestroy();
+    }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent ev) {
+        evTime = ev.getEventTime(); // for the latency log
+        long t0 = SystemClock.uptimeMillis();
+        try { handleEvent(ev); }
+        finally {
+            long took = SystemClock.uptimeMillis() - t0, waited = t0 - evTime;
+            if (took > 20 || waited > 150) Log.i("FSEV", "type=" + ev.getEventType() + " pkg=" + ev.getPackageName() + " waited=" + waited + "ms handler=" + took + "ms");
+        }
+    }
+
+    private void handleEvent(AccessibilityEvent ev) {
         CharSequence cs = ev.getPackageName();
         if (cs == null) return;
         String pkg = cs.toString();
@@ -102,6 +132,7 @@ public class FreeScrollService extends AccessibilityService {
 
         int type = ev.getEventType();
         long now = System.currentTimeMillis();
+        if (prevVolume < 0 && now - cacheAt > 1500) { cacheAt = now; bg.post(this::refreshAudioCache); } // keep the pre-read volume fresh
         if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
             float screenH = getResources().getDisplayMetrics().heightPixels;
             double px = Build.VERSION.SDK_INT >= 28 ? Math.abs(ev.getScrollDeltaY()) : 0;
@@ -127,8 +158,13 @@ public class FreeScrollService extends AccessibilityService {
 
     private boolean isKeyboard(String pkg) {
         if (pkg.contains("inputmethod") || pkg.contains("keyboard")) return true;
-        String ime = Settings.Secure.getString(getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
-        return ime != null && ime.startsWith(pkg + "/");
+        long now = SystemClock.uptimeMillis();
+        if (now - imeAt > 10000) { // the user's keyboard rarely changes: don't ask the system on every event
+            imeAt = now;
+            String ime = Settings.Secure.getString(getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
+            imePkg = ime == null ? "" : ime.split("/")[0];
+        }
+        return !imePkg.isEmpty() && imePkg.equals(pkg);
     }
 
     /** Package name for social apps, "web:<domain>" for a social site in a browser, else null. */
@@ -177,34 +213,44 @@ public class FreeScrollService extends AccessibilityService {
 
     private void updateRecentsCovers(String launcherPkg) {
         long now = System.currentTimeMillis();
-        if (now - lastRecentsScan < 100) return;
+        if (scanning || now - lastRecentsScan < 100) return;
         lastRecentsScan = now;
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-        List<Rect> rects = new ArrayList<>();
-        boolean recents = false;
-        try {
-            // view ids the launchers use for the preview of one task (Pixel launcher: "snapshot")
-            for (String id : new String[]{"snapshot", "task_view_thumbnail", "thumbnail"}) {
-                List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(launcherPkg + ":id/" + id);
-                if (nodes == null || nodes.isEmpty()) continue;
-                recents = true;
-                refreshLabels();
-                int w = getResources().getDisplayMetrics().widthPixels;
-                for (AccessibilityNodeInfo n : nodes) {
-                    CharSequence d = n.getContentDescription();
-                    String pkg = d == null ? null : labelToPkg.get(d.toString().trim().toLowerCase());
-                    if (pkg != null && Core.modeOf(pkg) == Core.HARD) {
-                        Rect b = new Rect(); n.getBoundsInScreen(b);
-                        if (b.width() > 0 && b.height() > 0 && b.right > 0 && b.left < w) rects.add(b);
+        scanning = true;
+        // Walking the launcher's view tree is slow, so do it off the main thread: otherwise every app that opens
+        // right after Home has to wait behind this scan before FreeScroll can mute it and show its screen.
+        bg.post(() -> {
+            final List<Rect> rects = new ArrayList<>();
+            boolean recents = false;
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root != null) {
+                try {
+                    // view ids the launchers use for the preview of one task (Pixel launcher: "snapshot")
+                    for (String id : new String[]{"snapshot", "task_view_thumbnail", "thumbnail"}) {
+                        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(launcherPkg + ":id/" + id);
+                        if (nodes == null || nodes.isEmpty()) continue;
+                        recents = true;
+                        refreshLabels();
+                        int w = getResources().getDisplayMetrics().widthPixels;
+                        for (AccessibilityNodeInfo n : nodes) {
+                            CharSequence d = n.getContentDescription();
+                            String pkg = d == null ? null : labelToPkg.get(d.toString().trim().toLowerCase());
+                            if (pkg != null && Core.modeOf(pkg) == Core.HARD) {
+                                Rect b = new Rect(); n.getBoundsInScreen(b);
+                                if (b.width() > 0 && b.height() > 0 && b.right > 0 && b.left < w) rects.add(b);
+                            }
+                            n.recycle();
+                        }
+                        break;
                     }
-                    n.recycle();
-                }
-                break;
+                } finally { root.recycle(); }
             }
-        } finally { root.recycle(); }
-        if (!recents) { removeCovers(); return; }
-        layoutCovers(rects);
+            final boolean isRecents = recents, hadRoot = root != null;
+            h.post(() -> {
+                scanning = false;
+                if (!hadRoot) return;
+                if (!isRecents) removeCovers(); else layoutCovers(rects);
+            });
+        });
     }
 
     private void layoutCovers(List<Rect> rects) {
@@ -273,7 +319,10 @@ public class FreeScrollService extends AccessibilityService {
         if (action == Core.NONE) return;
         if (overlay != null && overlayKind == action && site.equals(overlaySite)) return;
         if (overlay != null && overlayKind == Core.BREAK && action != Core.BREAK) return;
-        removeOverlay(); // keep the sound muted while one overlay replaces another
+        long s0 = SystemClock.uptimeMillis();
+        muteNow(); // FIRST silence the app, then draw: you should never hear it behind the screen
+        long s1 = SystemClock.uptimeMillis();
+        removeOverlay(); // (the sound stays muted while one overlay replaces another)
         overlayKind = action;
         overlaySite = site;
         LinearLayout box = new LinearLayout(this);
@@ -291,24 +340,53 @@ public class FreeScrollService extends AccessibilityService {
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.OPAQUE);
         lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
-        try { wm.addView(overlay, lp); quietMedia(); } catch (Exception e) { overlay = null; overlayKind = Core.NONE; }
+        box.setAlpha(0f); // fade in so the switch from the app to this screen feels smooth, not like a flash
+        long s2 = SystemClock.uptimeMillis();
+        try {
+            wm.addView(overlay, lp);
+            long s3 = SystemClock.uptimeMillis();
+            box.animate().alpha(1f).setDuration(140).start();
+            pauseApps(); // slower, best-effort part (audio focus + Pause key) after the screen is already up
+            Log.i("FSLAT", "event->screen " + (SystemClock.uptimeMillis() - evTime) + "ms | mute=" + (s1 - s0) + " build=" + (s2 - s1) + " addView=" + (s3 - s2) + " pause=" + (SystemClock.uptimeMillis() - s3));
+        } catch (Exception e) { overlay = null; overlayKind = Core.NONE; }
     }
 
     /**
      * While an overlay hides the app, silence it. Many apps (Facebook Reels, Instagram, TikTok) ignore audio
      * focus and the Pause key, so the only reliable way is to mute the media stream and restore it afterwards.
      */
-    private void quietMedia() {
+    private void muteNow() {
         if (audio == null || prevVolume >= 0) return; // already quiet
         try {
             final int music = AudioManager.STREAM_MUSIC;
-            int vol = audio.getStreamVolume(music);
-            if (vol > 0 && !audio.isStreamMute(music)) { // if the user already has it silent, leave it alone
+            if (cachedVol < 0) refreshAudioCache(); // very first use only; normally it was read ahead of time
+            final int vol = cachedVol;
+            if (vol > 0 && !cachedMuted) { // if the user already has it silent, leave it alone
                 prevVolume = vol;
-                Prefs.sp(this).edit().putInt("prevVol", vol).apply(); // survives a crash
-                audio.adjustStreamVolume(music, AudioManager.ADJUST_MUTE, 0);
-                if (!audio.isStreamMute(music)) audio.setStreamVolume(music, 0, 0); // OEMs that ignore ADJUST_MUTE
+                audio.adjustStreamVolume(music, AudioManager.ADJUST_MUTE, 0); // the ONE call that silences the app
+                cachedMuted = true;
+                bg.post(() -> { // bookkeeping and safety net, off the critical path
+                    Prefs.sp(this).edit().putInt("prevVol", vol).apply(); // survives a crash
+                    try { if (!audio.isStreamMute(music)) audio.setStreamVolume(music, 0, 0); } catch (Exception ignored) { } // OEMs that ignore ADJUST_MUTE
+                });
             }
+            Log.i("FSLAT", "event->mute " + (SystemClock.uptimeMillis() - evTime) + "ms");
+        } catch (Exception ignored) { }
+    }
+
+    /** Read the current media volume ahead of time (called off the main thread). */
+    private void refreshAudioCache() {
+        if (audio == null || prevVolume >= 0) return;
+        try {
+            cachedVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC);
+            cachedMuted = audio.isStreamMute(AudioManager.STREAM_MUSIC);
+        } catch (Exception ignored) { }
+    }
+
+    /** Also ask the app to pause (audio focus + media Pause key). Best effort; the mute above is what guarantees silence. */
+    private void pauseApps() {
+        if (audio == null) return;
+        try {
             boolean playing = audio.isMusicActive();
             if (Build.VERSION.SDK_INT >= 26) {
                 focusReq = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
@@ -340,11 +418,12 @@ public class FreeScrollService extends AccessibilityService {
             if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != vol) audio.setStreamVolume(AudioManager.STREAM_MUSIC, vol, 0);
         } catch (Exception ignored) { }
         Prefs.sp(this).edit().remove("prevVol").apply();
+        cachedVol = vol; cachedMuted = false;
     }
 
     private void dismiss() {
-        releaseMedia();
-        removeOverlay();
+        removeOverlay();   // screen goes first...
+        releaseMedia();    // ...then the sound comes back, so the two stay in step
     }
 
     /**
