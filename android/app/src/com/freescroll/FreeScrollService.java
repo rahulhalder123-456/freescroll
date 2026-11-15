@@ -42,6 +42,7 @@ public class FreeScrollService extends AccessibilityService {
     private AudioManager audio;
     private AudioFocusRequest focusReq;
     private int prevVolume = -1; // >= 0 while we hold the media stream muted
+    private long suppressUntil = 0; // ignore events until this time (set when the user leaves)
 
     private String lastPkg = "", lastSite = "";
     private long lastWebCheck = 0;
@@ -82,6 +83,7 @@ public class FreeScrollService extends AccessibilityService {
         if (cs == null) return;
         String pkg = cs.toString();
         if (pkg.equals(getPackageName()) || pkg.equals("com.android.systemui") || isKeyboard(pkg)) return;
+        if (System.currentTimeMillis() < suppressUntil) return;
 
         String site = siteFor(pkg);
         if (site == null) { lastPkg = pkg; lastSite = ""; dismiss(); return; }
@@ -209,6 +211,16 @@ public class FreeScrollService extends AccessibilityService {
         removeOverlay();
     }
 
+    /**
+     * Leave the app. Late events from the app we are leaving can arrive after the home screen is up and would
+     * re-show the overlay (and re-mute the sound) on top of the launcher, so ignore events briefly.
+     */
+    private void goHome() {
+        suppressUntil = System.currentTimeMillis() + 1800;
+        dismiss();
+        performGlobalAction(GLOBAL_ACTION_HOME);
+    }
+
     private void removeOverlay() {
         if (ticker != null) { h.removeCallbacks(ticker); ticker = null; }
         if (overlay != null) { try { wm.removeView(overlay); } catch (Exception ignored) { } }
@@ -242,7 +254,7 @@ public class FreeScrollService extends AccessibilityService {
         h.postDelayed(ticker, 1000);
         refresh.run();
         go.setOnClickListener(v -> { Core.gatePassed(site, System.currentTimeMillis()); Prefs.saveState(this); dismiss(); });
-        leave.setOnClickListener(v -> { dismiss(); performGlobalAction(GLOBAL_ACTION_HOME); });
+        leave.setOnClickListener(v -> goHome());
     }
 
     private void buildStop(LinearLayout box, String site) {
@@ -266,7 +278,7 @@ public class FreeScrollService extends AccessibilityService {
         box.addView(t);
         Button home = btn("Go home", "#2a343d");
         box.addView(home);
-        home.setOnClickListener(v -> { dismiss(); performGlobalAction(GLOBAL_ACTION_HOME); });
+        home.setOnClickListener(v -> goHome());
         ticker = new Runnable() { public void run() {
             long s = Core.breakLeftSecs(site, System.currentTimeMillis());
             if (s <= 0) { dismiss(); return; }
