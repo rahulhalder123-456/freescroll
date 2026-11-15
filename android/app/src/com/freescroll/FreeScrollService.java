@@ -5,7 +5,11 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.os.Build;
+import android.view.KeyEvent;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -35,6 +39,8 @@ public class FreeScrollService extends AccessibilityService {
     private int overlayKind = Core.NONE;
     private String overlaySite = "";
     private Runnable ticker;
+    private AudioManager audio;
+    private AudioFocusRequest focusReq;
 
     private String lastPkg = "", lastSite = "";
     private long lastWebCheck = 0;
@@ -59,6 +65,7 @@ public class FreeScrollService extends AccessibilityService {
     @Override protected void onServiceConnected() {
         super.onServiceConnected();
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        audio = (AudioManager) getSystemService(AUDIO_SERVICE);
         Prefs.apply(this);
         Prefs.restoreState(this);
     }
@@ -141,10 +148,38 @@ public class FreeScrollService extends AccessibilityService {
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.OPAQUE);
         lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
-        try { wm.addView(overlay, lp); } catch (Exception e) { overlay = null; overlayKind = Core.NONE; }
+        try { wm.addView(overlay, lp); quietMedia(); } catch (Exception e) { overlay = null; overlayKind = Core.NONE; }
+    }
+
+    /** While an overlay hides the app, stop its sound: take exclusive audio focus and send Pause. */
+    private void quietMedia() {
+        if (audio == null) return;
+        try {
+            boolean playing = audio.isMusicActive();
+            if (Build.VERSION.SDK_INT >= 26) {
+                focusReq = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                        .setOnAudioFocusChangeListener(change -> { }).build();
+                audio.requestAudioFocus(focusReq);
+            }
+            if (playing) {
+                audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE));
+                audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void releaseMedia() {
+        try {
+            if (audio != null && focusReq != null && Build.VERSION.SDK_INT >= 26) audio.abandonAudioFocusRequest(focusReq);
+        } catch (Exception ignored) { }
+        focusReq = null;
     }
 
     private void dismiss() {
+        releaseMedia();
         if (ticker != null) { h.removeCallbacks(ticker); ticker = null; }
         if (overlay != null) { try { wm.removeView(overlay); } catch (Exception ignored) { } }
         overlay = null; overlayKind = Core.NONE; overlaySite = "";
