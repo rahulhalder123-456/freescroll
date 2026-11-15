@@ -41,6 +41,7 @@ public class FreeScrollService extends AccessibilityService {
     private Runnable ticker;
     private AudioManager audio;
     private AudioFocusRequest focusReq;
+    private int prevVolume = -1; // >= 0 while we hold the media stream muted
 
     private String lastPkg = "", lastSite = "";
     private long lastWebCheck = 0;
@@ -68,9 +69,13 @@ public class FreeScrollService extends AccessibilityService {
         audio = (AudioManager) getSystemService(AUDIO_SERVICE);
         Prefs.apply(this);
         Prefs.restoreState(this);
+        int stuck = Prefs.sp(this).getInt("prevVol", -1); // we were killed while muted: give the sound back
+        if (stuck >= 0) restoreVolume(stuck);
     }
 
     @Override public void onInterrupt() { dismiss(); }
+    @Override public boolean onUnbind(android.content.Intent i) { dismiss(); return super.onUnbind(i); }
+    @Override public void onDestroy() { dismiss(); super.onDestroy(); }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent ev) {
         CharSequence cs = ev.getPackageName();
@@ -130,7 +135,7 @@ public class FreeScrollService extends AccessibilityService {
         if (action == Core.NONE) return;
         if (overlay != null && overlayKind == action && site.equals(overlaySite)) return;
         if (overlay != null && overlayKind == Core.BREAK && action != Core.BREAK) return;
-        dismiss();
+        removeOverlay(); // keep the sound muted while one overlay replaces another
         overlayKind = action;
         overlaySite = site;
         LinearLayout box = new LinearLayout(this);
@@ -151,10 +156,21 @@ public class FreeScrollService extends AccessibilityService {
         try { wm.addView(overlay, lp); quietMedia(); } catch (Exception e) { overlay = null; overlayKind = Core.NONE; }
     }
 
-    /** While an overlay hides the app, stop its sound: take exclusive audio focus and send Pause. */
+    /**
+     * While an overlay hides the app, silence it. Many apps (Facebook Reels, Instagram, TikTok) ignore audio
+     * focus and the Pause key, so the only reliable way is to mute the media stream and restore it afterwards.
+     */
     private void quietMedia() {
-        if (audio == null) return;
+        if (audio == null || prevVolume >= 0) return; // already quiet
         try {
+            final int music = AudioManager.STREAM_MUSIC;
+            int vol = audio.getStreamVolume(music);
+            if (vol > 0 && !audio.isStreamMute(music)) { // if the user already has it silent, leave it alone
+                prevVolume = vol;
+                Prefs.sp(this).edit().putInt("prevVol", vol).apply(); // survives a crash
+                audio.adjustStreamVolume(music, AudioManager.ADJUST_MUTE, 0);
+                if (!audio.isStreamMute(music)) audio.setStreamVolume(music, 0, 0); // OEMs that ignore ADJUST_MUTE
+            }
             boolean playing = audio.isMusicActive();
             if (Build.VERSION.SDK_INT >= 26) {
                 focusReq = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
@@ -176,10 +192,24 @@ public class FreeScrollService extends AccessibilityService {
             if (audio != null && focusReq != null && Build.VERSION.SDK_INT >= 26) audio.abandonAudioFocusRequest(focusReq);
         } catch (Exception ignored) { }
         focusReq = null;
+        if (prevVolume >= 0) { restoreVolume(prevVolume); prevVolume = -1; }
+    }
+
+    /** Un-mute and put the media volume back exactly where the user had it. */
+    private void restoreVolume(int vol) {
+        try {
+            audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
+            if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != vol) audio.setStreamVolume(AudioManager.STREAM_MUSIC, vol, 0);
+        } catch (Exception ignored) { }
+        Prefs.sp(this).edit().remove("prevVol").apply();
     }
 
     private void dismiss() {
         releaseMedia();
+        removeOverlay();
+    }
+
+    private void removeOverlay() {
         if (ticker != null) { h.removeCallbacks(ticker); ticker = null; }
         if (overlay != null) { try { wm.removeView(overlay); } catch (Exception ignored) { } }
         overlay = null; overlayKind = Core.NONE; overlaySite = "";
@@ -223,7 +253,7 @@ public class FreeScrollService extends AccessibilityService {
         box.addView(br); box.addView(more);
         br.setOnClickListener(v -> {
             Core.startBreak(site, System.currentTimeMillis()); Prefs.saveState(this);
-            dismiss(); show(Core.BREAK, site);
+            show(Core.BREAK, site);
         });
         more.setOnClickListener(v -> {
             Core.continueAnyway(site, getResources().getDisplayMetrics().heightPixels); dismiss();
